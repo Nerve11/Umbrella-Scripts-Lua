@@ -1,317 +1,391 @@
-local script = {}
-local myHero = nil
+local PuckScript = {}
 
--- Menu Creation
-local tabMain = Menu.Create("Heroes", "Hero List", "Puck")
-local generalGroup = tabMain:Create("Auto Phase Shift"):Create("Global")
-local attackGroup = tabMain:Create("Auto Phase Shift"):Create("Main")
-local visualGroup = tabMain:Create("Auto Phase Shift"):Create("Visual")
+-- Переменные
+local localHero = nil
+local gameTime = 0
+local projectileCounter = 0
 
--- UI Configuration
-local ui = {}
-ui.masterEnable = generalGroup:Switch("Enable Script", true, "\u{f058}")
-ui.logicEnable = attackGroup:Switch("Enable Logic", true, "\u{f00c}")
-ui.projectileCount = attackGroup:Slider("Min Active Projectiles", 1, 5, 2, function(v) 
-    return tostring(v) 
-end)
-ui.showDebug = attackGroup:Switch("Verbose Debug (console)", true, "\u{f188}")
-ui.iconSize = visualGroup:Slider("Icon Size", 32, 256, 64, function(v) 
-    return tostring(v) 
-end)
-ui.ctrlToDrag = visualGroup:Switch("Ctrl+LMB to Drag", true, "\u{f0b2}")
-ui.shadowEnable = visualGroup:Switch("Enable Shadow", true, "\u{f19c}")
-ui.shadowColor = visualGroup:ColorPicker("Shadow Color", Color(0, 128, 255), "\u{f0db}")
-ui.shadowThickness = visualGroup:Slider("Shadow Thickness", 1, 50, 4, function(v) 
-    return tostring(v) 
-end)
+-- Создание меню
+local mainMenu = Menu.Create("Heroes", "Hero List", "Puck")
+local phaseShiftMenu = mainMenu:Create("Auto Phase Shift"):Create("Global")
+local settings = {}
 
--- Data Storage
-local info = db.puckIndicator or {}
-db.puckIndicator = info
+-- Настройки скрипта
+settings.masterEnable = phaseShiftMenu:Switch("Enable Script", true, "🗸")
+local mainSettings = mainMenu:Create("Auto Phase Shift"):Create("Main")
+settings.logicEnabled = mainSettings:Switch("Enable Logic", true, "✓")
+settings.minProjectileCount = mainSettings:Slider("Min Projectiles to Dodge", 1, 5, 1, 
+    function(value) 
+        return tostring(value) 
+    end)
 
--- Constants
-local ICON_PATH = "panorama/images/spellicons/puck_phase_shift_png.vtex_c"
-local iconHandle = Render.LoadImage(ICON_PATH)
-local iconPos = Vec2(info.x or 100, info.y or 100)
-local KEY_CTRL = Enum.ButtonCode.KEY_LCONTROL
-local KEY_LMB = Enum.ButtonCode.KEY_MOUSE1
+-- Настройки UI индикатора
+db.puckIndicator = db.puckIndicator or {}
+local indicatorData = db.puckIndicator
+local font = Renderer.LoadFont("Arial", 20, Enum.FontCreate.FONTFLAG_ANTIALIAS)
 
--- Fonts
-local debugFont = Renderer.LoadFont("Tahoma", 12, 4, 4)
-local countFont = Renderer.LoadFont("Tahoma", 14, 4, 4)
+-- Переменные для анимации индикатора
+local indicatorYOffset = 0
+local indicatorTargetYOffset = 0
+local animationSpeed = 1
+local fadeInSpeed = 5
+local fadeOutSpeed = 15
+local activeColor = Color(255, 0, 0, 0)
+local hoverColor = Color(175, 175, 175, 0)
 
--- Debug System
-local debugMessages = {}
+-- UI элементы
+local indicatorXPos = nil
+local indicatorWidth = nil
+local smoothingFactor = 0.1
+local uiInitialized = false
+local centerPanel = nil
+local abilityBevel = nil
+local abilityButton = nil
 
-local function Debug(msg)
-    table.insert(debugMessages, {
-        text = msg,
-        time = GameRules.GetGameTime()
-    })
-    
-    if #debugMessages > 10 then
-        table.remove(debugMessages, 1)
-    end
-    
-    if ui.showDebug and ui.showDebug:Get() then
-        print("[Puck] " .. msg)
-    end
-end
-
--- Utility Functions
-local function isTrue(val)
-    return (val == true) or (val == "true") or (val == 1) or (val == "1")
-end
-
-local function Hero()
-    if not myHero then
-        myHero = Heroes.GetLocal()
-        if myHero then
-            Debug("Hero found: " .. NPC.GetUnitName(myHero))
-        end
-    end
-    return myHero
-end
-
--- Projectile Management
+-- Трекинг снарядов
 local activeProjectiles = {}
 local lastCastTime = 0
 
-local function IsTargetingHero(proj, hero)
-    if proj.target and (proj.target == hero) then
-        return true
+-- Функция инициализации UI
+local function initializeUI()
+    if uiInitialized then 
+        return 
     end
     
-    local targetName = proj["[m]target_name"]
-    return targetName and (targetName == NPC.GetUnitName(hero))
+    centerPanel = Panorama.GetPanelByName("center_bg")
+    if not centerPanel then 
+        return 
+    end
+    
+    local ability2Panel = Panorama.GetPanelByName("Ability2")
+    if ability2Panel then
+        abilityBevel = ability2Panel:FindChildTraverse("AbilityBevel")
+        abilityButton = ability2Panel:FindChildTraverse("AbilityButton")
+    end
+    
+    uiInitialized = true
 end
 
-local function CountProjectiles(now)
+-- Функция плавной анимации значений
+local function smoothTransition(current, target, speed)
+    if current < target then
+        return math.min(current + speed, target)
+    elseif current > target then
+        return math.max(current - speed, target)
+    end
+    return current
+end
+
+-- Получение позиции и размеров UI элемента
+local function getElementPosition(element)
+    local xOffset, yOffset = 0, 0
+    local currentElement = element
+    
+    while currentElement do
+        xOffset = xOffset + currentElement:GetXOffset()
+        yOffset = yOffset + currentElement:GetYOffset()
+        currentElement = currentElement:GetParent()
+    end
+    
+    return xOffset, yOffset
+end
+
+-- Получение полных координат и размеров элемента
+local function getElementBounds(element)
+    local x, y = getElementPosition(element)
+    local bounds = element:GetBounds()
+    local width = tonumber(bounds.w) or 0
+    local height = tonumber(bounds.h) or 0
+    return x, y, width, height
+end
+
+-- Получение локального героя
+local function getLocalHero()
+    if not localHero then
+        localHero = Heroes.GetLocal()
+    end
+    return localHero
+end
+
+-- Подсчет активных снарядов
+function GetActiveProjectileCount()
     local count = 0
-    for _, data in pairs(activeProjectiles) do
-        if data.eta > now then
+    local currentTime = GameRules.GetGameTime()
+    
+    for projectileId, projectileData in pairs(activeProjectiles) do
+        if (currentTime - projectileData.time) < 0.5 then
             count = count + 1
+        else
+            -- Удаляем устаревшие снаряды
+            activeProjectiles[projectileId] = nil
         end
     end
+    
     return count
 end
 
-local function Purge(now)
-    for handle, data in pairs(activeProjectiles) do
-        if data.eta <= now then
-            activeProjectiles[handle] = nil
+-- Обработчик новых снарядов
+PuckScript.OnProjectile = function(projectile)
+    local hero = getLocalHero()
+    if not hero then 
+        return 
+    end
+    
+    -- Проверяем, что это Puck
+    if NPC.GetUnitName(hero) ~= "npc_dota_hero_puck" then 
+        return 
+    end
+    
+    -- Проверяем, что скрипт включен
+    if not settings.masterEnable:Get() or not settings.logicEnabled:Get() then 
+        return 
+    end
+    
+    -- Проверяем, что герой жив
+    if not Entity.IsAlive(hero) then 
+        return 
+    end
+    
+    local source = projectile.source
+    local target = projectile.target
+    
+    -- Если снаряд летит в нашего героя от врага
+    if target == hero and source and not Entity.IsSameTeam(hero, source) then
+        local projectileId = projectile.id
+        
+        -- Генерируем ID если его нет
+        if not projectileId or projectileId == 0 then
+            projectileCounter = projectileCounter + 1
+            projectileId = "generated_" .. projectileCounter
+        end
+        
+        -- Сохраняем информацию о снаряде
+        activeProjectiles[projectileId] = {
+            source = source,
+            time = GameRules.GetGameTime()
+        }
+    end
+end
+
+-- Основной цикл обновления
+PuckScript.OnUpdate = function()
+    -- Проверяем, что скрипт включен
+    if not settings.masterEnable:Get() or not settings.logicEnabled:Get() then 
+        return 
+    end
+    
+    local hero = getLocalHero()
+    if not hero then 
+        return 
+    end
+    
+    -- Проверяем, что это Puck
+    if NPC.GetUnitName(hero) ~= "npc_dota_hero_puck" then 
+        return 
+    end
+    
+    -- Проверяем, что герой жив
+    if not Entity.IsAlive(hero) then 
+        return 
+    end
+    
+    local currentTime = GameRules.GetGameTime()
+    
+    -- Очищаем старые снаряды
+    for projectileId, projectileData in pairs(activeProjectiles) do
+        if (currentTime - projectileData.time) > 1 then
+            activeProjectiles[projectileId] = nil
+        end
+    end
+    
+    -- Проверяем, нужно ли использовать Phase Shift
+    if GetActiveProjectileCount() >= settings.minProjectileCount:Get() then
+        -- Проверяем кулдаун (не чаще раза в секунду)
+        if (currentTime - lastCastTime) > 1 then
+            local phaseShiftAbility = NPC.GetAbility(hero, "puck_phase_shift")
+            
+            if phaseShiftAbility and Ability.IsReady(phaseShiftAbility) then
+                -- Используем Phase Shift
+                Ability.CastNoTarget(phaseShiftAbility)
+                lastCastTime = currentTime
+                
+                -- Очищаем список снарядов после использования
+                activeProjectiles = {}
+            end
         end
     end
 end
 
-local function Register(proj)
-    local hero = Hero()
-    if not hero then
-        return
+-- Отрисовка индикатора
+PuckScript.OnDraw = function()
+    local hero = getLocalHero()
+    if not hero or NPC.GetUnitName(hero) ~= "npc_dota_hero_puck" then 
+        return 
     end
     
-    -- Check if projectile targets our hero
-    if not IsTargetingHero(proj, hero) then
-        return
+    -- Проверяем, что скрипт включен
+    if not settings.masterEnable:Get() then 
+        return 
     end
     
-    -- Skip friendly projectiles
-    if Entity.IsSameTeam(hero, proj.source) then
-        return
+    -- Проверяем, что Puck выбран
+    local selectedUnits = Player.GetSelectedUnits(Players.GetLocal())
+    if not selectedUnits then 
+        return 
     end
     
-    -- Only handle dodgeable projectiles or attacks
-    if not (isTrue(proj.dodgeable) or isTrue(proj.isAttack)) then
-        return
+    local isPuckSelected = false
+    for _, unit in ipairs(selectedUnits) do
+        if unit == hero then
+            isPuckSelected = true
+            break
+        end
     end
     
-    -- Calculate projectile impact time
-    local handle = proj.handle or tostring(math.random(1000000000))
-    local speed = tonumber(proj.moveSpeed) or 1000
-    
-    if speed < 50 then
-        speed = 1000
+    if not isPuckSelected then 
+        return 
     end
     
-    local now = GameRules.GetGameTime()
-    local eta
+    -- Инициализируем UI если нужно
+    if not uiInitialized then
+        initializeUI()
+    end
     
-    if proj.maxImpactTime and tonumber(proj.maxImpactTime) and (tonumber(proj.maxImpactTime) > 0) then
-        eta = now + tonumber(proj.maxImpactTime)
+    -- Проверяем, что все UI элементы доступны
+    if not (uiInitialized and centerPanel and abilityBevel and abilityButton) then 
+        return 
+    end
+    
+    local isLogicEnabled = settings.logicEnabled:Get()
+    
+    -- Получаем координаты элементов
+    local centerX, centerY, centerWidth, centerHeight = getElementBounds(centerPanel)
+    local bevelX, bevelY, bevelWidth, bevelHeight = getElementBounds(abilityBevel)
+    local buttonX, buttonY, buttonWidth, buttonHeight = getElementBounds(abilityButton)
+    
+    -- Инициализируем позицию индикатора
+    if indicatorXPos == nil then
+        indicatorXPos = bevelX
+    end
+    if indicatorWidth == nil then
+        indicatorWidth = bevelWidth
+    end
+    
+    -- Вычисляем позицию и размеры индикатора
+    local indicatorHeight = 5
+    local topY = centerY
+    local bottomY = topY - 3
+    local leftX = indicatorXPos
+    local rightX = bottomY + indicatorYOffset
+    local width = indicatorWidth
+    local rectHeight = topY - rightX
+    
+    -- Проверяем наведение курсора
+    local isCursorOver = Input.IsCursorInRect(leftX, rightX, width, rectHeight)
+    
+    -- Настройки цвета и анимации
+    local baseAlpha = 135
+    local epsilon = 0.1
+    local isAligned = (math.abs(indicatorXPos - buttonX) < epsilon) and 
+                     (math.abs(indicatorWidth - buttonWidth) < epsilon)
+    local hoverAlpha = (isCursorOver and isAligned and 255) or 0
+    
+    -- Анимация цвета
+    activeColor.a = smoothTransition(activeColor.a, baseAlpha, fadeOutSpeed)
+    hoverColor.a = smoothTransition(hoverColor.a, hoverAlpha, fadeOutSpeed)
+    
+    if activeColor.a == 0 then 
+        return 
+    end
+    
+    -- Установка цвета в зависимости от состояния
+    local targetColor = (isLogicEnabled and {r = 0, g = 255, b = 0}) or {r = 255, g = 0, b = 0}
+    activeColor.r = smoothTransition(activeColor.r, targetColor.r, fadeOutSpeed)
+    activeColor.g = smoothTransition(activeColor.g, targetColor.g, fadeOutSpeed)
+    activeColor.b = smoothTransition(activeColor.b, targetColor.b, fadeOutSpeed)
+    
+    -- Позиционирование индикатора
+    local indicatorRectX = indicatorXPos
+    local indicatorRectY = (bottomY - indicatorHeight) + indicatorYOffset
+    local indicatorRectWidth = indicatorWidth
+    local indicatorRectHeight = indicatorHeight
+    
+    -- Проверка наведения на индикатор
+    local isIndicatorHovered = Input.IsCursorInRect(leftX, rightX, width, rectHeight) or 
+                              Input.IsCursorInRect(indicatorRectX, indicatorRectY, indicatorRectWidth, indicatorRectHeight)
+    
+    -- Анимация сдвига
+    local isAtZero = math.abs(indicatorYOffset - 0) < epsilon
+    if isIndicatorHovered and isAligned then
+        indicatorTargetYOffset = -20
     else
-        local srcPos = Entity.GetAbsOrigin(proj.source)
-        local trgPos = Entity.GetAbsOrigin(hero)
-        local dist = (trgPos and srcPos and (trgPos - srcPos):Length2D()) or 600
-        eta = now + (dist / speed)
+        indicatorTargetYOffset = 0
     end
     
-    -- Store projectile data
-    activeProjectiles[handle] = {
-        name = proj.name or "unknown",
-        source = proj["[m]unit_name"] or "?",
-        eta = eta
-    }
-    
-    Debug(string.format("Registered ➜ %s from %s (ETA %.2fs)", 
-        proj.name or "?", 
-        proj["[m]unit_name"] or "?", 
-        eta - now))
-end
-
--- Script Event Handlers
-script.OnProjectile = function(proj)
-    Debug(string.format("Projectile callback: %s | isAttack=%s | dodgeable=%s",
-        tostring(proj.name),
-        tostring(proj.isAttack),
-        tostring(proj.dodgeable)))
-    
-    if not ui.masterEnable:Get() or not ui.logicEnable:Get() then
-        return
+    -- Плавное движение к цели
+    local targetX, targetWidth
+    if isIndicatorHovered then
+        targetX = buttonX
+        targetWidth = buttonWidth
+    elseif not isIndicatorHovered and not isAtZero then
+        targetX = buttonX
+        targetWidth = buttonWidth
+    else
+        targetX = bevelX
+        targetWidth = bevelWidth
     end
     
-    local hero = Hero()
-    if not hero then
-        return
+    -- Применение сглаживания
+    indicatorXPos = indicatorXPos + ((targetX - indicatorXPos) * smoothingFactor)
+    indicatorWidth = indicatorWidth + ((targetWidth - indicatorWidth) * smoothingFactor)
+    
+    -- Анимация вертикального смещения
+    if indicatorYOffset > indicatorTargetYOffset then
+        indicatorYOffset = math.max(indicatorYOffset - animationSpeed, indicatorTargetYOffset)
+    elseif indicatorYOffset < indicatorTargetYOffset then
+        indicatorYOffset = math.min(indicatorYOffset + animationSpeed, indicatorTargetYOffset)
     end
     
-    if NPC.GetUnitName(hero) ~= "npc_dota_hero_puck" then
-        return
-    end
+    -- Отрисовка тени
+    local shadowColor = Color(0, 0, 0, math.min(125, math.floor(activeColor.a)))
+    local shadowStart = Vec2(indicatorXPos, bottomY + indicatorYOffset)
+    local shadowEnd = Vec2(indicatorXPos + indicatorWidth, topY)
+    Render.FilledRect(shadowStart, shadowEnd, shadowColor, 0, Enum.DrawFlags.None)
     
-    if not Entity.IsAlive(hero) then
-        return
-    end
+    -- Отрисовка основного индикатора
+    local mainRectStart = Vec2(indicatorRectX, indicatorRectY)
+    local mainRectEnd = Vec2(indicatorRectX + indicatorRectWidth, indicatorRectY + indicatorRectHeight)
+    Render.FilledRect(mainRectStart, mainRectEnd, activeColor, 3, Enum.DrawFlags.RoundCornersTop)
     
-    Register(proj)
-end
-
-script.OnUpdate = function()
-    if not ui.masterEnable:Get() or not ui.logicEnable:Get() then
-        return
-    end
+    -- Отрисовка тени индикатора
+    local shadowStart2 = Vec2(indicatorRectX + 1, indicatorRectY + 1)
+    local shadowEnd2 = Vec2((indicatorRectX + indicatorRectWidth) - 3, indicatorRectY + indicatorRectHeight)
+    Render.Shadow(shadowStart2, shadowEnd2, activeColor, 20)
     
-    local hero = Hero()
-    if not hero then
-        return
-    end
-    
-    if NPC.GetUnitName(hero) ~= "npc_dota_hero_puck" then
-        return
-    end
-    
-    if not Entity.IsAlive(hero) then
-        return
-    end
-    
-    local now = GameRules.GetGameTime()
-    Purge(now)
-    
-    local count = CountProjectiles(now)
-    
-    -- Cast Phase Shift if enough projectiles are active
-    if (count >= ui.projectileCount:Get()) and ((now - lastCastTime) > 1) then
-        local ability = NPC.GetAbility(hero, "puck_phase_shift")
+    -- Отрисовка текста состояния
+    if hoverColor.a > 0 then
+        local textY1 = bottomY + indicatorYOffset
+        local textY2 = topY
+        local textCenterY = (textY1 + textY2) * 0.5
+        local statusText = (isLogicEnabled and "ON") or "OFF"
+        local textSize = Render.TextSize(1, 20, statusText)
+        local textX = (indicatorXPos + (indicatorWidth * 0.5)) - (textSize.x * 0.5)
+        local textY = textCenterY - (textSize.y * 0.5)
         
-        if ability and Ability.IsReady(ability) then
-            Debug("Casting Phase Shift – «" .. count .. "» active")
-            Ability.CastNoTarget(ability)
-            lastCastTime = now
-            activeProjectiles = {}
-        end
+        Render.Text(1, 20, statusText, Vec2(textX, textY), hoverColor)
+    end
+    
+    -- Обработка клика для переключения состояния
+    if Input.IsCursorInRect(leftX, rightX, width, rectHeight) and 
+       Input.IsKeyDownOnce(Enum.ButtonCode.KEY_MOUSE1) then
+        settings.logicEnabled:Set(not isLogicEnabled)
     end
 end
 
-script.OnDraw = function()
-    if not ui.masterEnable:Get() then
-        return
-    end
-    
-    local hero = Hero()
-    if not hero then
-        return
-    end
-    
-    -- Icon positioning and sizing
-    local size = Vec2(ui.iconSize:Get(), ui.iconSize:Get())
-    local half = size * 0.5
-    local topLeft = iconPos - half
-    local bottomRight = iconPos + half
-    local mouseX, mouseY = Input.GetCursorPos()
-    local mousePos = Vec2(mouseX, mouseY)
-    
-    -- Handle icon clicks (toggle logic)
-    if Input.IsKeyDownOnce(KEY_LMB) and 
-       not (ui.ctrlToDrag:Get() and Input.IsKeyDown(KEY_CTRL)) and
-       (mousePos.x >= topLeft.x) and (mousePos.x <= bottomRight.x) and
-       (mousePos.y >= topLeft.y) and (mousePos.y <= bottomRight.y) then
-        
-        ui.logicEnable:Set(not ui.logicEnable:Get())
-        Debug("Logic toggled: " .. tostring(ui.logicEnable:Get()))
-    end
-    
-    -- Handle icon dragging
-    if ui.ctrlToDrag:Get() and Input.IsKeyDown(KEY_CTRL) and 
-       Input.IsKeyDownOnce(KEY_LMB) and
-       (mousePos.x >= topLeft.x) and (mousePos.x <= bottomRight.x) and
-       (mousePos.y >= topLeft.y) and (mousePos.y <= bottomRight.y) then
-        
-        dragging = true
-        dragOffset = iconPos - mousePos
-    end
-    
-    if dragging and Input.IsKeyDown(KEY_LMB) then
-        local cursorX, cursorY = Input.GetCursorPos()
-        iconPos = Vec2(cursorX, cursorY) + dragOffset
-    end
-    
-    if dragging and not Input.IsKeyDown(KEY_LMB) then
-        dragging = false
-        info.x, info.y = iconPos.x, iconPos.y
-    end
-    
-    -- Render icon
-    local color = (ui.logicEnable:Get() and Color(255, 255, 255)) or Color(128, 128, 128)
-    
-    if ui.shadowEnable:Get() then
-        Render.Shadow(topLeft, bottomRight, ui.shadowColor:Get(), 
-            ui.shadowThickness:Get(), size.x * 0.2, 
-            Enum.DrawFlags.RoundCornersAll, Vec2(0, 0))
-    end
-    
-    Render.ImageCentered(iconHandle, iconPos, size, color, size.x * 0.2)
-    
-    -- Render projectile count
-    local projectileCount = CountProjectiles(GameRules.GetGameTime())
-    Render.Text(countFont, 14, tostring(projectileCount), 
-        Vec2(iconPos.x, iconPos.y + (size.y * 0.6)), color)
-    
-    -- Render debug information
-    if ui.showDebug:Get() then
-        local yPos = iconPos.y + size.y + 4
-        local lineStep = 16
-        local now = GameRules.GetGameTime()
-        
-        Render.Text(debugFont, 12, string.format("Time: %.2f", now),
-            Vec2(iconPos.x, yPos), Color(255, 255, 255))
-        yPos = yPos + lineStep
-        
-        for _, msg in ipairs(debugMessages) do
-            local alpha = 255 * math.max(0, 1 - ((now - msg.time) / 10))
-            Render.Text(debugFont, 12, msg.text,
-                Vec2(iconPos.x, yPos), Color(200, 255, 200, alpha))
-            yPos = yPos + lineStep
-        end
-    end
+-- Обработчик загрузки скрипта
+PuckScript.OnScriptLoad = function()
+    local hero = getLocalHero()
+    -- Дополнительная инициализация при необходимости
 end
 
-script.OnScriptLoad = function()
-    Debug("Script loaded – v1.1")
-    
-    local hero = Hero()
-    if hero and (NPC.GetUnitName(hero) ~= "npc_dota_hero_puck") then
-        Debug("WARNING: Not playing Puck – disabling")
-        ui.masterEnable:Set(false)
-    end
-end
-
-return script
+return PuckScript
