@@ -46,6 +46,5 @@ The author welcomes contributions and assistance in developing these open script
 If you'd like to contribute or have suggestions:
 
 *   **Contact the author**:
-    *   Telegram: `@Trivialsion`
     *   Discord: `xan707x`
 ---
